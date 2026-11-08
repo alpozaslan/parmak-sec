@@ -48,6 +48,10 @@
     font-size: 14px; padding: 10px 16px; border-radius: 999px; cursor: pointer; backdrop-filter: blur(12px); -webkit-backdrop-filter: blur(12px); }
   #corner button[aria-pressed="false"] { color: var(--muted); }
   #corner button[hidden] { display: none; }
+  #tapHint { position: fixed; left: 0; right: 0; bottom: max(28px, calc(env(safe-area-inset-bottom) + 16px)); text-align: center;
+    font-size: 15px; font-weight: 600; color: rgba(255,255,255,.85); text-shadow: 0 1px 6px rgba(0,0,0,.4);
+    pointer-events: none; opacity: 0; transition: opacity .4s; z-index: 1; }
+  #tapHint.show { opacity: 1; transition-delay: 1.2s; }
   @media (prefers-reduced-motion: reduce) { .finger-icon { animation: none; } }
 </style>
 </head>
@@ -73,6 +77,8 @@
   <p id="hintSub"></p>
 </div>
 
+<div id="tapHint">Yeni tur için ekrana dokunun</div>
+
 <div id="corner">
   <button id="snd" aria-pressed="true">Ses açık</button>
   <button id="vib" aria-pressed="true">Titreşim açık</button>
@@ -84,7 +90,7 @@
 (() => {
   const $ = s => document.querySelector(s);
   const canvas = $('#c'), ctx = canvas.getContext('2d');
-  const hint = $('#hint'), hintTitle = $('#hintTitle'), hintSub = $('#hintSub');
+  const hint = $('#hint'), hintTitle = $('#hintTitle'), hintSub = $('#hintSub'), tapHint = $('#tapHint');
 
   // ---------- sizing ----------
   let W = 0, H = 0;
@@ -98,7 +104,6 @@
 
   // ---------- settings ----------
   const HOLD = 500, COUNT = 2300, SPIN = 2100;   // stillness before ring, ring duration, spin duration (ms)
-  const LINGER = 3500;                            // how long the result stays after the last finger lifts (ms)
   const BEATS = [0, .28, .5, .65, .77, .86, .92, .96];  // heartbeat positions along the countdown, speeding up
   const clampInt = (v, a, b, d) => { v = Math.round(+v); return Number.isFinite(v) ? Math.min(b, Math.max(a, v)) : d; };
   let stored = {};
@@ -181,7 +186,7 @@
   // ---------- state ----------
   const fingers = new Map();   // id -> finger
   let dying = [], parts = [], shocks = [];
-  let ghosts = [], lingerUntil = 0;   // lifted fingers that keep showing the result for a while
+  let ghosts = [];   // lifted fingers that keep showing the result until the next tap
   let state = 'idle';          // idle | waiting | spinning | result
   let lastChange = 0, resultAt = -1e9, bg = null, mouseSeq = 0, spin = null;
   let beatIdx = 0, lastBeatAt = -1e9, flashAt = -1e9, shakeAt = -1e9;
@@ -210,8 +215,8 @@
     fingers.delete(id);
     if (state === 'result') {
       // Freeze the lifted finger where it was so everyone can still see the result.
+      // It stays until someone touches the screen again (addFinger → clearResult).
       ghosts.push(f);
-      if (fingers.size === 0) lingerUntil = performance.now() + LINGER;
       updateUI();
       return;
     }
@@ -221,7 +226,7 @@
   function dropGhosts(fade) {
     const now = performance.now();
     for (const g of ghosts) { g.diedAt = now; g.fade = fade; dying.push(g); }
-    ghosts = []; lingerUntil = 0;
+    ghosts = [];
   }
   // Any change before the result (finger added/lifted, settings) restarts the countdown and cancels a spin.
   function changed() {
@@ -233,15 +238,10 @@
   }
   function clearResult() {
     for (const f of fingers.values()) { f.win = f.rank = f.team = null; f.hue = f.baseHue; }
-    dropGhosts(320);
-    if (bg && !bg.fadeAt) bg.fadeAt = performance.now();
+    dropGhosts(450);
+    if (bg && !bg.fadeAt) { bg.fadeAt = performance.now(); bg.fadeDur = 500; }
     state = fingers.size ? 'waiting' : 'idle';
     lastChange = performance.now(); beatIdx = 0;
-  }
-  function endResult() {
-    dropGhosts(700);
-    if (bg && !bg.fadeAt) { bg.fadeAt = performance.now(); bg.fadeDur = 700; }
-    state = 'idle'; updateUI();
   }
   function shuffle(a) {
     for (let i = a.length - 1; i > 0; i--) {
@@ -278,6 +278,8 @@
     while (i + 1 < spin.times.length && el >= spin.times[i + 1]) i++;
     if (i !== spin.last) {
       spin.last = i;
+      // Teams and order land directly on the real result at the final step, with no extra pause.
+      if (settings.mode !== 'winner' && i === spin.times.length - 1) { reveal(now); return; }
       sfx.tick(i); buzz(14);
       if (settings.mode === 'winner') spin.cur = spin.seq[i];
       else if (settings.mode === 'teams') for (const f of fingers.values()) f.hue = spin.hues[rand(spin.hues.length)];
@@ -416,6 +418,7 @@
     } else if (state === 'result' && !live.some(f => !f.mouse) && ghosts.length === 0) {
       sub = 'Yeniden seçmek için herhangi bir yere tıkla';
     }
+    tapHint.classList.toggle('show', state === 'result' && ghosts.length > 0 && fingers.size === 0);
     hintTitle.textContent = title; hintSub.textContent = sub;
     hint.classList.toggle('off', !title && !sub);
     hint.classList.toggle('hide-icon', !icon);
@@ -466,9 +469,11 @@
     const label = f.spinLabel ?? f.rank ?? (f.team != null ? f.team + 1 : null);
     if (label != null) {
       ctx.save();
-      ctx.globalAlpha = alpha * (f.spinLabel != null ? .8 : rt * k);
+      // Final labels pop in right away instead of fading in slowly.
+      const pop = f.spinLabel != null ? 1 : easeOutBack(Math.min(1, (now - resultAt) / 260));
+      ctx.globalAlpha = alpha * (f.spinLabel != null ? .8 : k);
       ctx.fillStyle = '#fff'; ctx.shadowColor = 'rgba(0,0,0,.35)'; ctx.shadowBlur = 8;
-      ctx.font = `800 ${Math.round(r * 0.95)}px ui-rounded, system-ui, -apple-system, sans-serif`;
+      ctx.font = `800 ${Math.max(1, Math.round(r * 0.95 * pop))}px ui-rounded, system-ui, -apple-system, sans-serif`;
       ctx.textAlign = 'center'; ctx.textBaseline = 'middle';
       ctx.fillText(String(label), x, y + r * 0.05);
       ctx.restore();
@@ -487,9 +492,7 @@
       while (beatIdx < BEATS.length && raw >= BEATS[beatIdx]) { beatIdx++; lastBeatAt = now; sfx.beat(raw); buzz(Math.round(20 + raw * 40)); }
       if (raw >= 1) { startSpin(now); prog = 0; }
     }
-    if (state === 'spinning') stepSpin(now);
-    if (state === 'result' && lingerUntil && fingers.size === 0 && now >= lingerUntil) endResult();
-    beatKick = counting ? .14 * Math.exp(-(now - lastBeatAt) / 110) : 0;
+    if (state === 'spinning') stepSpin(now);    beatKick = counting ? .14 * Math.exp(-(now - lastBeatAt) / 110) : 0;
 
     ctx.save();
     const st = (now - shakeAt) / 550;
