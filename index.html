@@ -75,6 +75,7 @@
 
 <div id="corner">
   <button id="snd" aria-pressed="true">Ses açık</button>
+  <button id="vib" aria-pressed="true">Titreşim açık</button>
   <button id="clear" hidden>Temizle</button>
   <button id="fs" hidden aria-label="Tam ekranı aç/kapat">Tam ekran</button>
 </div>
@@ -105,7 +106,8 @@
   const settings = {
     mode: ['winner', 'teams', 'order'].includes(stored.mode) ? stored.mode : 'winner',
     counts: { winner: clampInt(stored.counts?.winner, 1, 8, 1), teams: clampInt(stored.counts?.teams, 2, 8, 2) },
-    sound: stored.sound !== false
+    sound: stored.sound !== false,
+    haptics: stored.haptics !== false
   };
   const save = () => { try { localStorage.setItem('fingerpick', JSON.stringify(settings)); } catch {} };
   const count = () => settings.counts[settings.mode] ?? 1;
@@ -152,7 +154,29 @@
       tone(1046.5, .7, 'triangle', .25, .34); tone(1318.5, .7, 'triangle', .18, .34); tone(1568, .7, 'sine', .12, .34);
     }
   };
-  const buzz = p => { try { navigator.vibrate?.(p); } catch {} };
+  // ---------- vibration ----------
+  // Android: Vibration API. iPhone Safari has no Vibration API, but on iOS 18+ toggling a
+  // <input type="checkbox" switch> through its label plays a short system haptic tap.
+  const canVibrate = typeof navigator.vibrate === 'function';
+  let iosSwitch = null;
+  if (!canVibrate) {
+    iosSwitch = document.createElement('label');
+    iosSwitch.setAttribute('aria-hidden', 'true');
+    iosSwitch.style.cssText = 'position:fixed;left:-9999px;top:0;opacity:0;pointer-events:none';
+    const inp = document.createElement('input'); inp.type = 'checkbox'; inp.setAttribute('switch', ''); inp.tabIndex = -1;
+    iosSwitch.appendChild(inp); document.body.appendChild(iosSwitch);
+  }
+  function buzz(p) {
+    if (!settings.haptics) return;
+    if (canVibrate) { try { navigator.vibrate(p); } catch {} return; }
+    // Turn the pattern into taps: one at the start of each "on" segment, more every 70ms for long ones.
+    const pat = Array.isArray(p) ? p : [p];
+    let t = 0;
+    for (let i = 0; i < pat.length; i += 2) {
+      for (let d = 0; d < pat[i] && d < 280; d += 70) setTimeout(() => { try { iosSwitch.click(); } catch {} }, t + d);
+      t += pat[i] + (pat[i + 1] || 0);
+    }
+  }
 
   // ---------- state ----------
   const fingers = new Map();   // id -> finger
@@ -178,6 +202,7 @@
     const h = pickHue();
     fingers.set(id, { id, x, y, baseHue: h, hue: h, born: performance.now(), phase: Math.random() * 6.28,
       mouse, win: null, rank: null, team: null, spinLabel: null });
+    if (!mouse) buzz(12);
     changed();
   }
   function removeFinger(id) {
@@ -253,7 +278,7 @@
     while (i + 1 < spin.times.length && el >= spin.times[i + 1]) i++;
     if (i !== spin.last) {
       spin.last = i;
-      sfx.tick(i); buzz(8);
+      sfx.tick(i); buzz(14);
       if (settings.mode === 'winner') spin.cur = spin.seq[i];
       else if (settings.mode === 'teams') for (const f of fingers.values()) f.hue = spin.hues[rand(spin.hues.length)];
       else for (const f of fingers.values()) f.spinLabel = 1 + rand(fingers.size);
@@ -279,7 +304,7 @@
       shocks.push({ x: arr[0].x, y: arr[0].y, at: now });
     }
     spin = null; state = 'result'; resultAt = now; flashAt = now; shakeAt = now;
-    sfx.fanfare(); buzz([60, 40, 220]);
+    sfx.fanfare(); buzz([90, 50, 90, 50, 320]);
     updateUI();
   }
 
@@ -329,7 +354,13 @@
   // ---------- UI ----------
   const modeBtns = [...document.querySelectorAll('[data-mode]')];
   const stepper = $('#stepper'), num = $('#num'), minus = $('#minus'), plus = $('#plus');
-  const clearBtn = $('#clear'), fsBtn = $('#fs'), sndBtn = $('#snd');
+  const clearBtn = $('#clear'), fsBtn = $('#fs'), sndBtn = $('#snd'), vibBtn = $('#vib');
+  vibBtn.hidden = !isTouch;
+  vibBtn.addEventListener('click', () => {
+    settings.haptics = !settings.haptics; save();
+    if (settings.haptics) buzz(40);
+    updateUI();
+  });
 
   function settingsChanged() {
     save();
@@ -364,6 +395,8 @@
     plus.disabled = n >= 8;
     sndBtn.textContent = settings.sound ? 'Ses açık' : 'Ses kapalı';
     sndBtn.setAttribute('aria-pressed', String(settings.sound));
+    vibBtn.textContent = settings.haptics ? 'Titreşim açık' : 'Titreşim kapalı';
+    vibBtn.setAttribute('aria-pressed', String(settings.haptics));
 
     const live = [...fingers.values()];
     document.body.classList.toggle('busy', live.some(f => !f.mouse) || state === 'spinning' || ghosts.length > 0);
@@ -451,7 +484,7 @@
     const raw = counting ? (now - lastChange - HOLD) / COUNT : -1;
     prog = Math.max(0, Math.min(1, raw));
     if (raw >= 0) {
-      while (beatIdx < BEATS.length && raw >= BEATS[beatIdx]) { beatIdx++; lastBeatAt = now; sfx.beat(raw); buzz(15); }
+      while (beatIdx < BEATS.length && raw >= BEATS[beatIdx]) { beatIdx++; lastBeatAt = now; sfx.beat(raw); buzz(Math.round(20 + raw * 40)); }
       if (raw >= 1) { startSpin(now); prog = 0; }
     }
     if (state === 'spinning') stepSpin(now);
