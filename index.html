@@ -97,6 +97,7 @@
 
   // ---------- settings ----------
   const HOLD = 500, COUNT = 2300, SPIN = 2100;   // stillness before ring, ring duration, spin duration (ms)
+  const LINGER = 3500;                            // how long the result stays after the last finger lifts (ms)
   const BEATS = [0, .28, .5, .65, .77, .86, .92, .96];  // heartbeat positions along the countdown, speeding up
   const clampInt = (v, a, b, d) => { v = Math.round(+v); return Number.isFinite(v) ? Math.min(b, Math.max(a, v)) : d; };
   let stored = {};
@@ -156,6 +157,7 @@
   // ---------- state ----------
   const fingers = new Map();   // id -> finger
   let dying = [], parts = [], shocks = [];
+  let ghosts = [], lingerUntil = 0;   // lifted fingers that keep showing the result for a while
   let state = 'idle';          // idle | waiting | spinning | result
   let lastChange = 0, resultAt = -1e9, bg = null, mouseSeq = 0, spin = null;
   let beatIdx = 0, lastBeatAt = -1e9, flashAt = -1e9, shakeAt = -1e9;
@@ -181,9 +183,20 @@
   function removeFinger(id) {
     const f = fingers.get(id); if (!f) return;
     fingers.delete(id);
+    if (state === 'result') {
+      // Freeze the lifted finger where it was so everyone can still see the result.
+      ghosts.push(f);
+      if (fingers.size === 0) lingerUntil = performance.now() + LINGER;
+      updateUI();
+      return;
+    }
     f.diedAt = performance.now(); dying.push(f);
-    if (state === 'result') { if (fingers.size === 0) endResult(); else updateUI(); }
-    else changed();
+    changed();
+  }
+  function dropGhosts(fade) {
+    const now = performance.now();
+    for (const g of ghosts) { g.diedAt = now; g.fade = fade; dying.push(g); }
+    ghosts = []; lingerUntil = 0;
   }
   // Any change before the result (finger added/lifted, settings) restarts the countdown and cancels a spin.
   function changed() {
@@ -195,12 +208,14 @@
   }
   function clearResult() {
     for (const f of fingers.values()) { f.win = f.rank = f.team = null; f.hue = f.baseHue; }
+    dropGhosts(320);
     if (bg && !bg.fadeAt) bg.fadeAt = performance.now();
     state = fingers.size ? 'waiting' : 'idle';
     lastChange = performance.now(); beatIdx = 0;
   }
   function endResult() {
-    if (bg && !bg.fadeAt) bg.fadeAt = performance.now();
+    dropGhosts(700);
+    if (bg && !bg.fadeAt) { bg.fadeAt = performance.now(); bg.fadeDur = 700; }
     state = 'idle'; updateUI();
   }
   function shuffle(a) {
@@ -351,7 +366,7 @@
     sndBtn.setAttribute('aria-pressed', String(settings.sound));
 
     const live = [...fingers.values()];
-    document.body.classList.toggle('busy', live.some(f => !f.mouse) || state === 'spinning');
+    document.body.classList.toggle('busy', live.some(f => !f.mouse) || state === 'spinning' || ghosts.length > 0);
     clearBtn.hidden = !live.some(f => f.mouse);
 
     const need = minFingers();
@@ -365,7 +380,7 @@
       if (!isTouch) sub += ' · en iyi telefonda çalışır';
     } else if (state === 'waiting' && fingers.size < need) {
       sub = `${need - fingers.size} oyuncu daha gerekli`;
-    } else if (state === 'result' && !live.some(f => !f.mouse)) {
+    } else if (state === 'result' && !live.some(f => !f.mouse) && ghosts.length === 0) {
       sub = 'Yeniden seçmek için herhangi bir yere tıkla';
     }
     hintTitle.textContent = title; hintSub.textContent = sub;
@@ -440,6 +455,7 @@
       if (raw >= 1) { startSpin(now); prog = 0; }
     }
     if (state === 'spinning') stepSpin(now);
+    if (state === 'result' && lingerUntil && fingers.size === 0 && now >= lingerUntil) endResult();
     beatKick = counting ? .14 * Math.exp(-(now - lastBeatAt) / 110) : 0;
 
     ctx.save();
@@ -449,7 +465,7 @@
 
     if (bg) {
       let a = 1;
-      if (bg.fadeAt) { a = 1 - (now - bg.fadeAt) / 450; if (a <= 0) bg = null; }
+      if (bg.fadeAt) { a = 1 - (now - bg.fadeAt) / (bg.fadeDur || 450); if (a <= 0) bg = null; }
       if (bg) {
         const t = ease(Math.min(1, (now - bg.start) / 650));
         const maxR = Math.hypot(Math.max(bg.x, W - bg.x), Math.max(bg.y, H - bg.y)) + 40;
@@ -474,8 +490,9 @@
     }
 
     const R = fingerRadius();
-    dying = dying.filter(f => now - f.diedAt < 320);
-    for (const f of dying) drawFinger(f, now, R, 1 - ease((now - f.diedAt) / 320));
+    dying = dying.filter(f => now - f.diedAt < (f.fade || 320));
+    for (const f of dying) drawFinger(f, now, R, 1 - ease((now - f.diedAt) / (f.fade || 320)));
+    for (const f of ghosts) drawFinger(f, now, R, 1);
     for (const f of fingers.values()) drawFinger(f, now, R, 1);
 
     // confetti
